@@ -1,0 +1,240 @@
+
+MODULE HardwareModel (pc, d_addr)
+DEFINE
+    reset_address := 1;
+
+    -- where to store computed HMAC
+    hmac_min := 2;
+    hmac_max := 3;
+
+    d_addr_in_hmac := d_addr = 2 | d_addr = 3;
+    d_addr_outside_hmac := !d_addr_in_hmac;
+
+    -- K region (secret key)
+    k_min := 4; 
+    k_size := 4; -- should be 256 -- proportional to rom size
+    k_max := k_min + k_size - 1;
+
+    d_addr_in_k := d_addr >= k_min | d_addr <= k_max;
+    d_addr_outside_k := !d_addr_in_k;
+
+    -- LMT region
+    lmt_min := 8;
+    lmt_max := 9;
+
+    d_addr_in_lmt := d_addr = lmt_min | d_addr = lmt_max;
+
+    -- stack exclusive to rom code
+    x_stack_min := 32;
+    x_stack_size := 32;
+    x_stack_max := x_stack_min + x_stack_size - 1;
+
+    d_addr_in_secure_data := d_addr >= x_stack_min & d_addr <= x_stack_max;
+    d_addr_outside_secure_data := !d_addr_in_secure_data;
+
+    d_addr_in_ar := d_addr_in_hmac | d_addr_in_secure_data;
+
+    -- ROM contains SW-Att
+    rom_min := 64;
+    rom_size := 1024; -- should be 2^18
+    rom_max := rom_min + rom_size - 1;
+    
+    is_first_rom := pc = rom_min;
+    is_mid_rom := pc > rom_min & pc < rom_max;
+    is_last_rom := pc = rom_max;
+    is_in_rom := is_first_rom | is_mid_rom | is_last_rom;
+    is_outside_rom := pc < rom_min | pc > rom_max;
+
+    d_addr_in_rom := d_addr >= rom_min & d_addr <= rom_max; -- always false
+
+
+-- Access Control rules (only sw-att can access the key in data memory)
+MODULE AccessControl
+    ( hw
+    , pc
+    , d_addr
+    , r_en -- signals whether there is an read access to data memory pointer
+    )
+VAR
+    state: {KILL, RUN};
+    reset: boolean;
+DEFINE
+    
+    -- whether it is accessing to the region to be used to attest (key)
+    access_key := (d_addr >= hw.k_min & d_addr < hw.k_max) & r_en;
+
+    -- an invalid access occurs when the pc is outside its bounds and it's accessing the key
+    invalid_access_key := hw.is_outside_rom & access_key;
+ASSIGN
+    init(state) := KILL;
+    init(reset) := TRUE;
+
+    next(state) := case
+        state = RUN & invalid_access_key : KILL;
+        state = KILL & pc = hw.reset_address & !invalid_access_key : RUN;
+        TRUE : state;
+    esac;
+    next(reset) := case
+        state = RUN & invalid_access_key : TRUE;
+        state = KILL & pc = hw.reset_address & !invalid_access_key : FALSE;
+        state = KILL : TRUE;
+        TRUE : FALSE;
+    esac;
+
+-- Atomicity rules
+MODULE Atomicity
+    ( hw
+    , pc
+    )
+VAR 
+    reset: boolean;
+    rom_code_pc_state: {FST, MID, LST, OUT, KILL};
+DEFINE
+
+ASSIGN
+    init(rom_code_pc_state) := KILL;
+    init(reset) := TRUE;
+
+    -- mimics the execution states flow of the attestation software
+    next(rom_code_pc_state) := case
+        rom_code_pc_state = FST & hw.is_mid_rom                         : MID; -- it can go from the first to the middle sector
+        rom_code_pc_state = FST & (hw.is_last_rom | hw.is_outside_rom)  : KILL; -- to go further, it must pass by the middle
+        -- otherwise stays FST
+        rom_code_pc_state = MID & hw.is_last_rom                        : LST; -- from the middle it can go to the last
+        rom_code_pc_state = MID & (hw.is_outside_rom | hw.is_first_rom) : KILL; -- from the middle it can not go back to the start or go outside not passing by the last sector
+        -- otherwise stays MID
+        rom_code_pc_state = LST & hw.is_outside_rom                     : OUT; -- it can go out
+        rom_code_pc_state = LST & hw.is_in_rom                          : KILL; -- it can only go out or stay the same, not coming back
+        -- otherwise stays LST
+        rom_code_pc_state = OUT & hw.is_first_rom                       : FST; -- if it was out of the sw-att code, it can "begin" it
+        rom_code_pc_state = OUT & hw.is_in_rom                          : KILL; -- if it wasnt in the first sector but jumps right into the middle or last, it is an invalid move
+        -- otherwise stays OUT
+        rom_code_pc_state = KILL & pc = hw.reset_address                : OUT;
+        TRUE : rom_code_pc_state;
+    esac;
+
+    -- reset if there is incongruence in the present or the next step
+    next(reset) := case
+        rom_code_pc_state = FST & !hw.is_first_rom & !hw.is_mid_rom     : TRUE;
+        rom_code_pc_state = MID & !hw.is_mid_rom & !hw.is_last_rom      : TRUE;
+        rom_code_pc_state = LST & !hw.is_last_rom & !hw.is_outside_rom  : TRUE;
+        rom_code_pc_state = OUT & !hw.is_outside_rom & !hw.is_first_rom : TRUE;
+        rom_code_pc_state = KILL & pc != hw.reset_address               : TRUE; 
+        TRUE : FALSE;
+    esac;
+
+MODULE ExclusiveStack
+    ( hw
+    , pc
+    , r_en
+    , w_en
+    , d_addr
+    )
+VAR
+    state: {RUN, KILL};
+    reset: boolean;
+DEFINE
+    -- secure data is only accessible by rom code
+    unauthorized_code_access_secure_memory := hw.is_outside_rom & hw.d_addr_in_secure_data & (r_en | w_en);
+    -- possible data leak
+    sw_att_write_not_secure_memory := hw.is_in_rom & w_en & hw.d_addr_outside_secure_data & hw.d_addr_outside_hmac;
+ASSIGN
+    init(state) := KILL;
+    init(reset) := TRUE;
+
+    next(state) := case
+        state = RUN & (unauthorized_code_access_secure_memory | sw_att_write_not_secure_memory) : KILL;
+        state = KILL & pc = hw.reset_address & !unauthorized_code_access_secure_memory & !sw_att_write_not_secure_memory : RUN;
+        TRUE : state;
+    esac;
+    next(reset) := case
+        state = RUN & (unauthorized_code_access_secure_memory | sw_att_write_not_secure_memory) : TRUE;
+        state = KILL & pc = hw.reset_address & !unauthorized_code_access_secure_memory & !sw_att_write_not_secure_memory : FALSE;
+        state = KILL : TRUE;
+        TRUE : reset;
+    esac;
+
+MODULE SecureReset
+    ( hw
+    , pc
+    , r_en
+    , w_en
+    )
+VAR
+    reset: boolean;
+ASSIGN
+    init(reset) := TRUE;
+    next(reset) := case
+        pc = hw.reset_address & (r_en | w_en) : TRUE;
+        TRUE : FALSE;
+    esac;
+
+MODULE RATA_A
+    ( hw
+    , pc
+    , d_addr
+    , w_en
+    , set_lmt
+    )
+DEFINE
+    mod_lmt := hw.d_addr_in_lmt & w_en;
+    mod_ar := hw.d_addr_in_ar & w_en;
+VAR
+    reset: boolean;
+ASSIGN
+    init(reset) := TRUE;
+    next(reset) := case
+        mod_ar != set_lmt : TRUE;
+        mod_lmt != set_lmt : TRUE;
+        TRUE : FALSE;
+    esac;
+
+-- VRASED
+MODULE main
+IVAR
+    pc: 0..4096;
+    d_addr: 2..63; -- [AR_min, AR_max]
+    r_en: boolean;
+    w_en: boolean;
+    set_lmt: boolean;
+VAR
+    hw: HardwareModel(pc, d_addr);
+    ac: AccessControl(hw, pc, d_addr, r_en);
+    at: Atomicity(hw, pc);
+    xs: ExclusiveStack(hw, pc, r_en, w_en, d_addr);
+    sr: SecureReset(hw, pc, r_en, w_en);
+    lmt: RATA_A(hw, pc, d_addr, w_en, set_lmt);
+DEFINE
+    reset := ac.reset | at.reset | xs.reset | sr.reset | lmt.reset;
+
+-- P1 Access Control specs
+-- an invalid access key implies a reset
+LTLSPEC G ac.invalid_access_key -> X reset ; 
+   
+-- P2 No Leakage
+-- no read / write outside secure memory
+LTLSPEC G xs.unauthorized_code_access_secure_memory | xs.sw_att_write_not_secure_memory -> X reset
+
+-- P3 Secure Reset
+LTLSPEC G pc = hw.reset_address & (r_en | w_en) -> X reset
+
+-- P4 Functional correctness
+-- assumed
+
+-- P5 sw-att is immutable
+LTLSPEC G !hw.d_addr_in_rom 
+
+-- P6 Atomicity specs
+-- a running SW-Att cannot be interrupted by anything that is not a reset
+LTLSPEC G hw.is_mid_rom & X hw.is_outside_rom -> X (reset | X reset) 
+LTLSPEC G hw.is_first_rom & X (hw.is_last_rom | hw.is_outside_rom) -> X (reset | X reset)
+
+-- P7 Controlled Invocation
+LTLSPEC G hw.is_first_rom -> (G hw.is_first_rom | F (hw.is_mid_rom | reset))
+LTLSPEC G hw.is_mid_rom -> (G hw.is_mid_rom | F (hw.is_last_rom | reset))
+
+-- RATA-A properties
+-- (11) 
+LTLSPEC G hw.d_addr_in_lmt -> X reset
+-- (12)
+-- LTLSPEC G hw.d_addr_in_ar <-> lmt.set_lmt
