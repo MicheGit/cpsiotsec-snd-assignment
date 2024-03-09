@@ -7,9 +7,6 @@ DEFINE
     hmac_min := 2;
     hmac_max := 3;
 
-    d_addr_in_hmac := d_addr = 2 | d_addr = 3;
-    d_addr_outside_hmac := !d_addr_in_hmac;
-
     -- K region (secret key)
     k_min := 4; 
     k_size := 4; -- should be 256 -- proportional to rom size
@@ -23,9 +20,6 @@ DEFINE
     x_stack_size := 32;
     x_stack_max := x_stack_min + x_stack_size - 1;
 
-    d_addr_in_secure_data := d_addr >= x_stack_min & d_addr <= x_stack_max;
-    d_addr_outside_secure_data := !d_addr_in_secure_data;
-
     -- ROM contains SW-Att
     rom_min := 64;
     rom_size := 1024; -- should be 2^18
@@ -37,7 +31,7 @@ DEFINE
     is_in_rom := is_first_rom | is_mid_rom | is_last_rom;
     is_outside_rom := pc < rom_min | pc > rom_max;
 
-    d_addr_in_rom := d_addr >= rom_min | d_addr <= rom_max;
+    d_addr_in_rom := d_addr >= rom_min & d_addr <= rom_max; -- always false
 
 
 -- Access Control rules (only sw-att can access the key in data memory)
@@ -126,10 +120,16 @@ VAR
     state: {RUN, KILL};
     reset: boolean;
 DEFINE
+    
+    d_addr_in_hmac := d_addr = 2 | d_addr = 3;
+    d_addr_outside_hmac := !d_addr_in_hmac;
+
+    d_addr_in_secure_data := d_addr >= hw.x_stack_min & d_addr <= hw.x_stack_max;
+    d_addr_outside_secure_data := !d_addr_in_secure_data;
     -- secure data is only accessible by rom code
-    unauthorized_code_access_secure_memory := hw.is_outside_rom & hw.d_addr_in_secure_data & (r_en | w_en);
+    unauthorized_code_access_secure_memory := hw.is_outside_rom & d_addr_in_secure_data & (r_en | w_en);
     -- possible data leak
-    sw_att_write_not_secure_memory := hw.is_in_rom & w_en & hw.d_addr_outside_secure_data & hw.d_addr_outside_hmac;
+    sw_att_write_not_secure_memory := hw.is_in_rom & w_en & d_addr_outside_secure_data & d_addr_outside_hmac;
 ASSIGN
     init(state) := KILL;
     init(reset) := TRUE;
@@ -146,45 +146,77 @@ ASSIGN
         TRUE : reset;
     esac;
 
+MODULE SecureReset
+    ( hw
+    , pc
+    , r_en
+    , w_en
+    )
+VAR
+    reset: boolean;
+ASSIGN
+    init(reset) := TRUE;
+    next(reset) := case
+        pc = hw.reset_address & (r_en | w_en) : TRUE;
+        TRUE : FALSE;
+    esac;
+
+-- Same rules apply to direct memory access
+MODULE DirectMemoryAccess
+    ( hw
+    , pc
+    , dma_addr
+    , dma_en
+    )
+VAR
+    ac: AccessControl(hw, pc, dma_addr, dma_en);
+    xs: ExclusiveStack(hw, pc, dma_en, dma_en, dma_addr);
+DEFINE
+    reset := ac.reset | xs.reset;
+
 -- VRASED
 MODULE main
 IVAR
     pc: 0..4096;
-    d_addr: 2048..2056;
+    d_addr: 2..63; -- [AR_min, AR_max]
     r_en: boolean;
     w_en: boolean;
+    dma_addr: 2..63;
+    dma_en: boolean;
 VAR
     hw: HardwareModel(pc, d_addr);
     ac: AccessControl(hw, pc, d_addr, r_en);
     at: Atomicity(hw, pc);
     xs: ExclusiveStack(hw, pc, r_en, w_en, d_addr);
-    reset: boolean;
-ASSIGN
-    init(reset) := ac.reset | at.reset | xs.reset;
-    next(reset) := ac.reset | at.reset | xs.reset;
+    sr: SecureReset(hw, pc, r_en, w_en);
+    dma: DirectMemoryAccess(hw, pc, dma_addr, dma_en);
+DEFINE
+    reset := ac.reset | at.reset | xs.reset | sr.reset | dma.reset;
 
 -- P1 Access Control specs
 -- an invalid access key implies a reset
-LTLSPEC G( ac.invalid_access_key -> X ac.reset ); 
+LTLSPEC G ac.invalid_access_key -> X reset 
+LTLSPEC G dma.ac.invalid_access_key -> X reset 
    
 -- P2 No Leakage
--- no write outside secure memory
-LTLSPEC G( xs.unauthorized_code_access_secure_memory | xs.sw_att_write_not_secure_memory -> X xs.reset)
+-- no read / write outside secure memory
+LTLSPEC G xs.unauthorized_code_access_secure_memory | xs.sw_att_write_not_secure_memory -> X reset
+LTLSPEC G dma.xs.unauthorized_code_access_secure_memory | dma.xs.sw_att_write_not_secure_memory -> X reset
 
 -- P3 Secure Reset
--- assumed as axiom
+LTLSPEC G pc = hw.reset_address & (r_en | w_en) -> X reset
 
 -- P4 Functional correctness
--- assumed as axiom
+-- assumed
 
 -- P5 sw-att is immutable
--- LTLSPEC G(hw.d_addr_in_rom & w_en -> X reset)
+LTLSPEC G !hw.d_addr_in_rom 
 
 -- P6 Atomicity specs
 -- a running SW-Att cannot be interrupted by anything that is not a reset
-LTLSPEC G(hw.is_mid_rom & X hw.is_outside_rom -> X (at.reset | X at.reset) );
-LTLSPEC G(hw.is_first_rom & X (hw.is_last_rom | hw.is_outside_rom) -> X (at.reset | X at.reset));
+LTLSPEC G hw.is_mid_rom & X hw.is_outside_rom -> X (reset | X reset) 
+LTLSPEC G hw.is_first_rom & X (hw.is_last_rom | hw.is_outside_rom) -> X (reset | X reset)
 
 -- P7 Controlled Invocation
-LTLSPEC G(hw.is_first_rom -> (G hw.is_first_rom | F (hw.is_mid_rom | at.reset)));
-LTLSPEC G(hw.is_mid_rom -> (G hw.is_mid_rom | F (hw.is_last_rom | at.reset)));
+LTLSPEC G hw.is_first_rom -> (G hw.is_first_rom | F (hw.is_mid_rom | reset))
+LTLSPEC G hw.is_mid_rom -> (G hw.is_mid_rom | F (hw.is_last_rom | reset))
