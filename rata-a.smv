@@ -202,7 +202,7 @@ ASSIGN
     init(reset) := TRUE;
 
     next(state) := case
-        mod_ar & !set_lmt : KILL;
+        mod_ar != set_lmt : KILL;
         mod_lmt : KILL;
         state = KILL & pc = hw.reset_address : RUN;
         TRUE : state;
@@ -210,7 +210,7 @@ ASSIGN
 
 
     next(reset) := case
-        mod_ar & !set_lmt : TRUE;
+        mod_ar != set_lmt : TRUE;
         mod_lmt : TRUE;
         state = KILL & pc = hw.reset_address : FALSE;
         state = KILL : TRUE;
@@ -270,4 +270,5 @@ LTLSPEC G hw.is_mid_rom -> (G hw.is_mid_rom | F (hw.is_last_rom | reset))
 -- (11) 
 LTLSPEC G rata_a.mod_lmt -> X reset
 -- (12)
-LTLSPEC G rata_a.mod_ar <-> set_lmt
+LTLSPEC G rata_a.mod_ar -> X set_lmt
+LTLSPEC G set_lmt -> X (rata_a.mod_ar | reset)
