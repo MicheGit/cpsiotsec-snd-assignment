@@ -61,9 +61,9 @@ ASSIGN
         TRUE : state;
     esac;
     next(reset) := case
-        state = RUN & invalid_access_key : TRUE;
-        state = KILL & pc = hw.reset_address & !invalid_access_key : FALSE;
-        state = KILL : TRUE;
+        next(state) = RUN & invalid_access_key : TRUE;
+        next(state) = KILL & pc = hw.reset_address & !invalid_access_key : FALSE;
+        next(state) = KILL : TRUE;
         TRUE : FALSE;
     esac;
 
@@ -101,11 +101,11 @@ ASSIGN
 
     -- reset if there is incongruence in the present or the next step
     next(reset) := case
-        rom_code_pc_state = FST & !hw.is_first_rom & !hw.is_mid_rom     : TRUE;
-        rom_code_pc_state = MID & !hw.is_mid_rom & !hw.is_last_rom      : TRUE;
-        rom_code_pc_state = LST & !hw.is_last_rom & !hw.is_outside_rom  : TRUE;
-        rom_code_pc_state = OUT & !hw.is_outside_rom & !hw.is_first_rom : TRUE;
-        rom_code_pc_state = KILL & pc != hw.reset_address               : TRUE; 
+        next(rom_code_pc_state) = FST & !hw.is_first_rom & !hw.is_mid_rom     : TRUE;
+        next(rom_code_pc_state) = MID & !hw.is_mid_rom & !hw.is_last_rom      : TRUE;
+        next(rom_code_pc_state) = LST & !hw.is_last_rom & !hw.is_outside_rom  : TRUE;
+        next(rom_code_pc_state) = OUT & !hw.is_outside_rom & !hw.is_first_rom : TRUE;
+        next(rom_code_pc_state) = KILL & pc != hw.reset_address               : TRUE; 
         TRUE : FALSE;
     esac;
 
@@ -140,9 +140,9 @@ ASSIGN
         TRUE : state;
     esac;
     next(reset) := case
-        state = RUN & (unauthorized_code_access_secure_memory | sw_att_write_not_secure_memory) : TRUE;
-        state = KILL & pc = hw.reset_address & !unauthorized_code_access_secure_memory & !sw_att_write_not_secure_memory : FALSE;
-        state = KILL : TRUE;
+        next(state) = RUN & (unauthorized_code_access_secure_memory | sw_att_write_not_secure_memory) : TRUE;
+        next(state) = KILL & pc = hw.reset_address & !unauthorized_code_access_secure_memory & !sw_att_write_not_secure_memory : FALSE;
+        next(state) = KILL : TRUE;
         TRUE : reset;
     esac;
 
@@ -195,16 +195,16 @@ DEFINE
 
 -- P1 Access Control specs
 -- an invalid access key implies a reset
-LTLSPEC G ac.invalid_access_key -> X reset 
-LTLSPEC G dma.ac.invalid_access_key -> X reset 
+LTLSPEC G (ac.invalid_access_key -> reset)
+LTLSPEC G (dma.ac.invalid_access_key -> reset )
    
 -- P2 No Leakage
 -- no read / write outside secure memory
-LTLSPEC G xs.unauthorized_code_access_secure_memory | xs.sw_att_write_not_secure_memory -> X reset
-LTLSPEC G dma.xs.unauthorized_code_access_secure_memory | dma.xs.sw_att_write_not_secure_memory -> X reset
+LTLSPEC G (xs.unauthorized_code_access_secure_memory | xs.sw_att_write_not_secure_memory -> reset)
+LTLSPEC G (dma.xs.unauthorized_code_access_secure_memory | dma.xs.sw_att_write_not_secure_memory -> reset)
 
 -- P3 Secure Reset
-LTLSPEC G pc = hw.reset_address & (r_en | w_en) -> X reset
+LTLSPEC G ((pc = hw.reset_address & (r_en | w_en)) -> reset)
 
 -- P4 Functional correctness
 -- assumed
@@ -214,9 +214,9 @@ LTLSPEC G !hw.d_addr_in_rom
 
 -- P6 Atomicity specs
 -- a running SW-Att cannot be interrupted by anything that is not a reset
-LTLSPEC G hw.is_mid_rom & X hw.is_outside_rom -> X (reset | X reset) 
-LTLSPEC G hw.is_first_rom & X (hw.is_last_rom | hw.is_outside_rom) -> X (reset | X reset)
+LTLSPEC G ((hw.is_mid_rom & X hw.is_outside_rom) -> reset)
+LTLSPEC G ((hw.is_first_rom & X (hw.is_last_rom | hw.is_outside_rom)) -> reset)
 
 -- P7 Controlled Invocation
-LTLSPEC G hw.is_first_rom -> (G hw.is_first_rom | F (hw.is_mid_rom | reset))
-LTLSPEC G hw.is_mid_rom -> (G hw.is_mid_rom | F (hw.is_last_rom | reset))
+LTLSPEC G (hw.is_first_rom -> (G hw.is_first_rom | F (hw.is_mid_rom | reset)))
+LTLSPEC G (hw.is_mid_rom -> (G hw.is_mid_rom | F (hw.is_last_rom | reset)))

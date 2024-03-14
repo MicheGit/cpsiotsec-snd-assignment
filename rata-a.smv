@@ -42,6 +42,7 @@ DEFINE
     ar_max := ar_min + ar_size;
 
 
+
 -- Access Control rules (only sw-att can access the key in data memory)
 MODULE AccessControl
     ( hw
@@ -69,9 +70,9 @@ ASSIGN
         TRUE : state;
     esac;
     next(reset) := case
-        state = RUN & invalid_access_key : TRUE;
-        state = KILL & pc = hw.reset_address & !invalid_access_key : FALSE;
-        state = KILL : TRUE;
+        next(state) = RUN & invalid_access_key : TRUE;
+        next(state) = KILL & pc = hw.reset_address & !invalid_access_key : FALSE;
+        next(state) = KILL : TRUE;
         TRUE : FALSE;
     esac;
 
@@ -109,11 +110,11 @@ ASSIGN
 
     -- reset if there is incongruence in the present or the next step
     next(reset) := case
-        rom_code_pc_state = FST & !hw.is_first_rom & !hw.is_mid_rom     : TRUE;
-        rom_code_pc_state = MID & !hw.is_mid_rom & !hw.is_last_rom      : TRUE;
-        rom_code_pc_state = LST & !hw.is_last_rom & !hw.is_outside_rom  : TRUE;
-        rom_code_pc_state = OUT & !hw.is_outside_rom & !hw.is_first_rom : TRUE;
-        rom_code_pc_state = KILL & pc != hw.reset_address               : TRUE; 
+        next(rom_code_pc_state) = FST & !hw.is_first_rom & !hw.is_mid_rom     : TRUE;
+        next(rom_code_pc_state) = MID & !hw.is_mid_rom & !hw.is_last_rom      : TRUE;
+        next(rom_code_pc_state) = LST & !hw.is_last_rom & !hw.is_outside_rom  : TRUE;
+        next(rom_code_pc_state) = OUT & !hw.is_outside_rom & !hw.is_first_rom : TRUE;
+        next(rom_code_pc_state) = KILL & pc != hw.reset_address               : TRUE; 
         TRUE : FALSE;
     esac;
 
@@ -148,9 +149,9 @@ ASSIGN
         TRUE : state;
     esac;
     next(reset) := case
-        state = RUN & (unauthorized_code_access_secure_memory | sw_att_write_not_secure_memory) : TRUE;
-        state = KILL & pc = hw.reset_address & !unauthorized_code_access_secure_memory & !sw_att_write_not_secure_memory : FALSE;
-        state = KILL : TRUE;
+        next(state) = RUN & (unauthorized_code_access_secure_memory | sw_att_write_not_secure_memory) : TRUE;
+        next(state) = KILL & pc = hw.reset_address & !unauthorized_code_access_secure_memory & !sw_att_write_not_secure_memory : FALSE;
+        next(state) = KILL : TRUE;
         TRUE : reset;
     esac;
 
@@ -159,13 +160,14 @@ MODULE SecureReset
     , pc
     , r_en
     , w_en
+    , dma_en
     )
 VAR
     reset: boolean;
 ASSIGN
     init(reset) := TRUE;
     next(reset) := case
-        pc = hw.reset_address & (r_en | w_en) : TRUE;
+        pc = hw.reset_address & (r_en | w_en | dma_en) : TRUE;
         TRUE : FALSE;
     esac;
 
@@ -189,31 +191,31 @@ MODULE RATA_A
     , w_en
     , dma_addr
     , dma_en
-    , set_lmt
     )
 DEFINE
     mod_lmt := (w_en & d_addr >= hw.lmt_min & d_addr <= hw.lmt_max) | (dma_en & dma_addr >= hw.lmt_min & dma_addr <= hw.lmt_max);
     mod_ar := (w_en & d_addr >= hw.ar_min & d_addr <= hw.ar_max) | (dma_en & dma_addr >= hw.ar_min & dma_addr <= hw.ar_max);
+    set_lmt := mod_ar;
 VAR
-    state: {RUN, KILL};
+    state: {MOD, NOTMOD, RESET};
     reset: boolean;
 ASSIGN
-    init(state) := KILL;
+    init(state) := RESET;
     init(reset) := TRUE;
 
     next(state) := case
-        mod_ar != set_lmt : KILL;
-        mod_lmt : KILL;
-        state = KILL & pc = hw.reset_address : RUN;
+        mod_lmt : RESET;
+        state = RESET & pc = hw.reset_address : MOD;
+        state = NOTMOD & mod_ar : MOD;
+        state = MOD & !mod_ar : NOTMOD;
         TRUE : state;
     esac;
 
 
     next(reset) := case
-        mod_ar != set_lmt : TRUE;
         mod_lmt : TRUE;
-        state = KILL & pc = hw.reset_address : FALSE;
-        state = KILL : TRUE;
+        next(state) = RESET & pc = hw.reset_address : FALSE;
+        next(state) = RESET : TRUE;
         TRUE : reset;
     esac;
 
@@ -226,30 +228,30 @@ IVAR
     w_en: boolean;
     dma_addr: 2..63;
     dma_en: boolean;
-    set_lmt: boolean;
 VAR
     hw: HardwareModel(pc, d_addr);
     ac: AccessControl(hw, pc, d_addr, r_en);
     at: Atomicity(hw, pc);
     xs: ExclusiveStack(hw, pc, r_en, w_en, d_addr);
-    sr: SecureReset(hw, pc, r_en, w_en);
+    sr: SecureReset(hw, pc, r_en, w_en, dma_en);
     dma: DirectMemoryAccess(hw, pc, dma_addr, dma_en);
-    rata_a: RATA_A(hw, pc, d_addr, w_en, dma_addr, dma_en, set_lmt);
+    rata_a: RATA_A(hw, pc, d_addr, w_en, dma_addr, dma_en);
 DEFINE
     reset := ac.reset | at.reset | xs.reset | sr.reset | dma.reset | rata_a.reset;
 
+
 -- P1 Access Control specs
 -- an invalid access key implies a reset
-LTLSPEC G ac.invalid_access_key -> X reset 
-LTLSPEC G dma.ac.invalid_access_key -> X reset 
+LTLSPEC G (ac.invalid_access_key -> reset)
+LTLSPEC G (dma.ac.invalid_access_key -> reset )
    
 -- P2 No Leakage
 -- no read / write outside secure memory
-LTLSPEC G xs.unauthorized_code_access_secure_memory | xs.sw_att_write_not_secure_memory -> X reset
-LTLSPEC G dma.xs.unauthorized_code_access_secure_memory | dma.xs.sw_att_write_not_secure_memory -> X reset
+LTLSPEC G (xs.unauthorized_code_access_secure_memory | xs.sw_att_write_not_secure_memory -> reset)
+LTLSPEC G (dma.xs.unauthorized_code_access_secure_memory | dma.xs.sw_att_write_not_secure_memory -> reset)
 
 -- P3 Secure Reset
-LTLSPEC G pc = hw.reset_address & (r_en | w_en) -> X reset
+LTLSPEC G ((pc = hw.reset_address & (r_en | w_en)) -> reset)
 
 -- P4 Functional correctness
 -- assumed
@@ -259,16 +261,16 @@ LTLSPEC G !hw.d_addr_in_rom
 
 -- P6 Atomicity specs
 -- a running SW-Att cannot be interrupted by anything that is not a reset
-LTLSPEC G hw.is_mid_rom & X hw.is_outside_rom -> X (reset | X reset) 
-LTLSPEC G hw.is_first_rom & X (hw.is_last_rom | hw.is_outside_rom) -> X (reset | X reset)
+LTLSPEC G ((hw.is_mid_rom & X hw.is_outside_rom) -> reset)
+LTLSPEC G ((hw.is_first_rom & X (hw.is_last_rom | hw.is_outside_rom)) -> reset)
 
 -- P7 Controlled Invocation
-LTLSPEC G hw.is_first_rom -> (G hw.is_first_rom | F (hw.is_mid_rom | reset))
-LTLSPEC G hw.is_mid_rom -> (G hw.is_mid_rom | F (hw.is_last_rom | reset))
+LTLSPEC G (hw.is_first_rom -> (G hw.is_first_rom | F (hw.is_mid_rom | reset)))
+LTLSPEC G (hw.is_mid_rom -> (G hw.is_mid_rom | F (hw.is_last_rom | reset)))
+
 
 -- RATA-A properties
 -- (11) 
-LTLSPEC G rata_a.mod_lmt -> X reset
+LTLSPEC G (rata_a.mod_lmt -> reset)
 -- (12)
-LTLSPEC G rata_a.mod_ar -> X set_lmt
-LTLSPEC G set_lmt -> X (rata_a.mod_ar | reset)
+LTLSPEC G (rata_a.mod_ar <-> rata_a.set_lmt)
