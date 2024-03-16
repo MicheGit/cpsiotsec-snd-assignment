@@ -1,11 +1,11 @@
 
 MODULE HardwareModel (pc, d_addr)
 DEFINE
-    reset_address := 1;
+    reset_address := 0;
 
-    -- where to store computed HMAC
-    hmac_min := 2;
-    hmac_max := 3;
+    -- LMT region
+    lmt_min := 2;
+    lmt_max := 3;
 
     -- K region (secret key)
     k_min := 4; 
@@ -15,15 +15,20 @@ DEFINE
     d_addr_in_k := d_addr >= k_min | d_addr <= k_max;
     d_addr_outside_k := !d_addr_in_k;
 
+    -- where to store computed HMAC
+    hmac_min := 8;
+    hmac_max := 9;
+
     -- stack exclusive to rom code
     x_stack_min := 32;
     x_stack_size := 32;
     x_stack_max := x_stack_min + x_stack_size - 1;
 
-    -- ROM contains SW-Att
+    -- ROM contains SW-Att (also called CR in the paper)
     rom_min := 64;
     rom_size := 1024; -- should be 2^18
     rom_max := rom_min + rom_size - 1;
+    after_auth := 65;
     
     is_first_rom := pc = rom_min;
     is_mid_rom := pc > rom_min & pc < rom_max;
@@ -32,6 +37,11 @@ DEFINE
     is_outside_rom := pc < rom_min | pc > rom_max;
 
     d_addr_in_rom := d_addr >= rom_min & d_addr <= rom_max; -- always false
+
+    ar_min := 1088;
+    ar_size := 256;
+    ar_max := ar_min + ar_size;
+
 
 
 -- Access Control rules (only sw-att can access the key in data memory)
@@ -61,9 +71,9 @@ ASSIGN
         TRUE : state;
     esac;
     next(reset) := case
-        state = RUN & invalid_access_key : TRUE;
-        state = KILL & pc = hw.reset_address & !invalid_access_key : FALSE;
-        state = KILL : TRUE;
+        next(state) = RUN & invalid_access_key : TRUE;
+        next(state) = KILL & pc = hw.reset_address & !invalid_access_key : FALSE;
+        next(state) = KILL : TRUE;
         TRUE : FALSE;
     esac;
 
@@ -101,11 +111,11 @@ ASSIGN
 
     -- reset if there is incongruence in the present or the next step
     next(reset) := case
-        rom_code_pc_state = FST & !hw.is_first_rom & !hw.is_mid_rom     : TRUE;
-        rom_code_pc_state = MID & !hw.is_mid_rom & !hw.is_last_rom      : TRUE;
-        rom_code_pc_state = LST & !hw.is_last_rom & !hw.is_outside_rom  : TRUE;
-        rom_code_pc_state = OUT & !hw.is_outside_rom & !hw.is_first_rom : TRUE;
-        rom_code_pc_state = KILL & pc != hw.reset_address               : TRUE; 
+        next(rom_code_pc_state) = FST & !hw.is_first_rom & !hw.is_mid_rom     : TRUE;
+        next(rom_code_pc_state) = MID & !hw.is_mid_rom & !hw.is_last_rom      : TRUE;
+        next(rom_code_pc_state) = LST & !hw.is_last_rom & !hw.is_outside_rom  : TRUE;
+        next(rom_code_pc_state) = OUT & !hw.is_outside_rom & !hw.is_first_rom : TRUE;
+        next(rom_code_pc_state) = KILL & pc != hw.reset_address               : TRUE; 
         TRUE : FALSE;
     esac;
 
@@ -140,9 +150,9 @@ ASSIGN
         TRUE : state;
     esac;
     next(reset) := case
-        state = RUN & (unauthorized_code_access_secure_memory | sw_att_write_not_secure_memory) : TRUE;
-        state = KILL & pc = hw.reset_address & !unauthorized_code_access_secure_memory & !sw_att_write_not_secure_memory : FALSE;
-        state = KILL : TRUE;
+        next(state) = RUN & (unauthorized_code_access_secure_memory | sw_att_write_not_secure_memory) : TRUE;
+        next(state) = KILL & pc = hw.reset_address & !unauthorized_code_access_secure_memory & !sw_att_write_not_secure_memory : FALSE;
+        next(state) = KILL : TRUE;
         TRUE : reset;
     esac;
 
@@ -151,13 +161,14 @@ MODULE SecureReset
     , pc
     , r_en
     , w_en
+    , dma_en
     )
 VAR
     reset: boolean;
 ASSIGN
     init(reset) := TRUE;
     next(reset) := case
-        pc = hw.reset_address & (r_en | w_en) : TRUE;
+        pc = hw.reset_address & (r_en | w_en | dma_en) : TRUE;
         TRUE : FALSE;
     esac;
 
@@ -174,6 +185,39 @@ VAR
 DEFINE
     reset := ac.reset | xs.reset;
 
+MODULE RATA_B 
+    ( hw
+    , pc
+    , d_addr
+    , w_en
+    , dma_addr
+    , dma_en
+    )
+DEFINE
+    mod_lmt := (w_en & d_addr >= hw.lmt_min & d_addr <= hw.lmt_max) | (dma_en & dma_addr >= hw.lmt_min & dma_addr <= hw.lmt_max);
+    mod_ar := (w_en & d_addr >= hw.ar_min & d_addr <= hw.ar_max) | (dma_en & dma_addr >= hw.ar_min & dma_addr <= hw.ar_max);
+VAR
+    state: {ATTEST, NOTMOD, UPDATE, MOD, RESET};
+    reset: boolean;
+ASSIGN
+    init(state) := RESET;
+    init(reset) := TRUE;
+
+    next(state) := case
+        mod_lmt                               : RESET;
+        state != RESET & mod_ar               : MOD;
+        (state = MOD | state = ATTEST) & pc = hw.after_auth : UPDATE;
+        state = ATTEST & pc = hw.rom_max      : NOTMOD;
+        state = UPDATE & pc != hw.after_auth  : ATTEST;
+        state = RESET & pc = hw.reset_address : MOD;
+        TRUE                                  : state;
+    esac;
+    next(reset) := case
+        next(state) = RESET : TRUE;
+        state = RESET & pc = hw.reset_address : FALSE;
+        TRUE : reset;
+    esac;
+
 -- VRASED
 MODULE main
 IVAR
@@ -188,23 +232,25 @@ VAR
     ac: AccessControl(hw, pc, d_addr, r_en);
     at: Atomicity(hw, pc);
     xs: ExclusiveStack(hw, pc, r_en, w_en, d_addr);
-    sr: SecureReset(hw, pc, r_en, w_en);
+    sr: SecureReset(hw, pc, r_en, w_en, dma_en);
     dma: DirectMemoryAccess(hw, pc, dma_addr, dma_en);
+    rata_b: RATA_B(hw, pc, d_addr, w_en, dma_addr, dma_en);
 DEFINE
     reset := ac.reset | at.reset | xs.reset | sr.reset | dma.reset;
 
+
 -- P1 Access Control specs
 -- an invalid access key implies a reset
-LTLSPEC G ac.invalid_access_key -> X reset 
-LTLSPEC G dma.ac.invalid_access_key -> X reset 
+LTLSPEC G (ac.invalid_access_key -> reset)
+LTLSPEC G (dma.ac.invalid_access_key -> reset )
    
 -- P2 No Leakage
 -- no read / write outside secure memory
-LTLSPEC G xs.unauthorized_code_access_secure_memory | xs.sw_att_write_not_secure_memory -> X reset
-LTLSPEC G dma.xs.unauthorized_code_access_secure_memory | dma.xs.sw_att_write_not_secure_memory -> X reset
+LTLSPEC G (xs.unauthorized_code_access_secure_memory | xs.sw_att_write_not_secure_memory -> reset)
+LTLSPEC G (dma.xs.unauthorized_code_access_secure_memory | dma.xs.sw_att_write_not_secure_memory -> reset)
 
 -- P3 Secure Reset
-LTLSPEC G pc = hw.reset_address & (r_en | w_en) -> X reset
+LTLSPEC G ((pc = hw.reset_address & (r_en | w_en)) -> reset)
 
 -- P4 Functional correctness
 -- assumed
@@ -214,9 +260,15 @@ LTLSPEC G !hw.d_addr_in_rom
 
 -- P6 Atomicity specs
 -- a running SW-Att cannot be interrupted by anything that is not a reset
-LTLSPEC G hw.is_mid_rom & X hw.is_outside_rom -> X (reset | X reset) 
-LTLSPEC G hw.is_first_rom & X (hw.is_last_rom | hw.is_outside_rom) -> X (reset | X reset)
+LTLSPEC G ((hw.is_mid_rom & X hw.is_outside_rom) -> reset)
+LTLSPEC G ((hw.is_first_rom & X (hw.is_last_rom | hw.is_outside_rom)) -> reset)
 
 -- P7 Controlled Invocation
-LTLSPEC G hw.is_first_rom -> (G hw.is_first_rom | F (hw.is_mid_rom | reset))
-LTLSPEC G hw.is_mid_rom -> (G hw.is_mid_rom | F (hw.is_last_rom | reset))
+LTLSPEC G (hw.is_first_rom -> (G hw.is_first_rom | F (hw.is_mid_rom | reset)))
+LTLSPEC G (hw.is_mid_rom -> (G hw.is_mid_rom | F (hw.is_last_rom | reset)))
+
+
+-- RATA-B properties
+-- (15) 
+LTLSPEC G (rata_b.mod_lmt -> reset)
+-- (16)

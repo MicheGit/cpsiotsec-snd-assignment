@@ -1,7 +1,7 @@
 
 MODULE HardwareModel (pc, d_addr)
 DEFINE
-    reset_address := 1;
+    reset_address := 0;
 
     -- where to store computed HMAC
     hmac_min := 2;
