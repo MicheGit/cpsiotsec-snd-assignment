@@ -199,9 +199,11 @@ DEFINE
 VAR
     state: {ATTEST, NOTMOD, UPDATE, MOD, RESET};
     reset: boolean;
+    up_lmt: boolean;
 ASSIGN
     init(state) := RESET;
     init(reset) := TRUE;
+    init(up_lmt) := FALSE;
 
     next(state) := case
         mod_lmt                               : RESET;
@@ -216,6 +218,10 @@ ASSIGN
         next(state) = RESET : TRUE;
         state = RESET & pc = hw.reset_address : FALSE;
         TRUE : reset;
+    esac;
+    next(up_lmt) := case
+        next(state) = UPDATE & !next(reset) : TRUE;
+        TRUE : FALSE;
     esac;
 
 -- VRASED
@@ -272,3 +278,9 @@ LTLSPEC G (hw.is_mid_rom -> (G hw.is_mid_rom | F (hw.is_last_rom | reset)))
 -- (15) 
 LTLSPEC G (rata_b.mod_lmt -> reset)
 -- (16)
+LTLSPEC G ((!rata_b.up_lmt & X rata_b.up_lmt) -> X pc = hw.after_auth)
+-- (17)
+-- Weak until (W) does not exist in plain LTL
+-- (pc = hw.after_auth -> rata_b.up_lmt) W (pc = hw.rom_max | reset)
+--  <-> ((pc = hw.after_auth -> rata_b.up_lmt) U (pc = hw.rom_max | reset)) | G (pc = hw.rom_max | reset)
+LTLSPEC G ((rata_b.mod_ar | reset) -> (((pc = hw.after_auth -> rata_b.up_lmt) U (pc = hw.rom_max | reset)) | G (pc = hw.rom_max | reset)))
