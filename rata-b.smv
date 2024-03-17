@@ -199,11 +199,9 @@ DEFINE
 VAR
     state: {ATTEST, NOTMOD, UPDATE, MOD, RESET};
     reset: boolean;
-    up_lmt: boolean;
 ASSIGN
     init(state) := RESET;
     init(reset) := TRUE;
-    init(up_lmt) := FALSE;
 
     next(state) := case
         mod_lmt                               : RESET;
@@ -219,10 +217,8 @@ ASSIGN
         state = RESET & pc = hw.reset_address : FALSE;
         TRUE : reset;
     esac;
-    next(up_lmt) := case
-        next(state) = UPDATE & !next(reset) : TRUE;
-        TRUE : FALSE;
-    esac;
+DEFINE
+    up_lmt := next(state) = UPDATE & !next(reset);
 
 -- VRASED
 MODULE main
