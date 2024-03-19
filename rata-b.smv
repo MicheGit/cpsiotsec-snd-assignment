@@ -271,12 +271,13 @@ LTLSPEC G (hw.is_mid_rom -> (G hw.is_mid_rom | F (hw.is_last_rom | reset)))
 
 
 -- RATA-B properties
--- (15) 
+-- (15) LMT is read only to software
 LTLSPEC G (rata_b.mod_lmt -> reset)
--- (16)
+-- (16) LMT updates are triggered only by the program counter being in the instruction right after the authentication
 LTLSPEC G ((!rata_b.up_lmt & X rata_b.up_lmt) -> X pc = hw.after_auth)
 -- (17)
 -- Weak until (W) does not exist in plain LTL
 -- (pc = hw.after_auth -> rata_b.up_lmt) W (pc = hw.rom_max | reset)
 --  <-> ((pc = hw.after_auth -> rata_b.up_lmt) U (pc = hw.rom_max | reset)) | G (pc = hw.rom_max | reset)
+-- An attested region modification implies a LMT update in the next authentication
 LTLSPEC G ((rata_b.mod_ar | reset) -> (((pc = hw.after_auth -> rata_b.up_lmt) U (pc = hw.rom_max | reset)) | G (pc = hw.rom_max | reset)))

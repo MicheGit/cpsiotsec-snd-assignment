@@ -1,4 +1,4 @@
-
+-- This models the hardware setup, hence telling where the parts of the software or memory are located
 MODULE HardwareModel (pc, d_addr)
 DEFINE
     reset_address := 0;
@@ -109,6 +109,7 @@ ASSIGN
         TRUE : FALSE;
     esac;
 
+-- Enforcing that the stack is inaccessible by unauthorized software
 MODULE ExclusiveStack
     ( hw
     , pc
@@ -146,6 +147,7 @@ ASSIGN
         TRUE : reset;
     esac;
 
+-- Ensuring that both read and write signals are resetted after a general reset.
 MODULE SecureReset
     ( hw
     , pc

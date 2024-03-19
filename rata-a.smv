@@ -270,7 +270,7 @@ LTLSPEC G (hw.is_mid_rom -> (G hw.is_mid_rom | F (hw.is_last_rom | reset)))
 
 
 -- RATA-A properties
--- (11) 
+-- (11) LMT is read only to software
 LTLSPEC G (rata_a.mod_lmt -> reset)
--- (12)
+-- (12) LMT is modified (by the hardware) iff the attested region is modified.
 LTLSPEC G (rata_a.mod_ar <-> rata_a.set_lmt)
